@@ -1,11 +1,15 @@
-# Snipaste 离线授权方案 — 完整技术分析
+# Snipaste v2.11.3 离线授权分析
 
-> 基于对客户端二进制（Qt 6.2.4，x64）的逆向，记录授权码（license）的生成、编码、签名、校验全流程，以及客户端使用的算法、密钥与各层保护机制。
-> 本文档用于说明 `main.py` / `device_id.py` 的实现依据。
+## 声明
+本项目基于：[Snipaste-2.10.8-x64 离线激活记录 - DirWangK - 博客园](https://www.cnblogs.com/DirWang/p/19258416) 文章中的代码进行更新来兼容snipaste v2.11.3 版本。
+项目地址： https://github.com/1226357697/snipaste_keygen/tree/main
 
----
+效果图：
+![效果图](./assets/效果图.png)
 
-## 0. 总览
+## 离线授权方案
+
+### 0. 总览
 
 授权码（用户输入的序列号）形如：
 
@@ -35,9 +39,9 @@
 
 ---
 
-## 1. 授权码外层格式
+### 1. 授权码外层格式
 
-### 1.1 结构
+#### 1.1 结构
 
 | 位置 | 内容 | 说明 |
 |------|------|------|
@@ -50,7 +54,7 @@
 - 要求 `len > 3` 且 `code[2] == '-'`，否则直接判废。
 - 取 `code[1]` 作为校验字符，与对载荷算出的校验字符比对。
 
-### 1.2 校验字符算法（`sub_140288C00`）
+#### 1.2 校验字符算法（`sub_140288C00`）
 
 对 Base64 载荷字符串求"相邻字符 ASCII 差的绝对值之和"，再取 `载荷[sum % len]` 作为校验字符：
 
@@ -64,16 +68,16 @@ def calculate_adjacent_char_diff_sum(s: str) -> str:
 
 > 仅防手误/防随手伪造，无密码学强度。
 
-### 1.3 Base64 变体（`sub_140289400`）
+#### 1.3 Base64 变体（`sub_140289400`）
 
 客户端自动探测：载荷含 `'+'` 或 `'/'` → 标准 Base64；否则 → URL-safe Base64。
 生成端用 `base64.standard_b64encode`（标准表）。
 
 ---
 
-## 2. 载荷的解码/解密链
+### 2. 载荷的解码/解密链
 
-### 2.1 客户端解码（`postProcessBody` = `sub_14024AB20`）
+#### 2.1 客户端解码（`postProcessBody` = `sub_14024AB20`）
 
 ```
 data = Base64解码结果
@@ -88,7 +92,7 @@ body = gunzip(body)               # zlib inflate, wbits=31 (gzip 格式)
 return header + body              # body 段即明文 JSON
 ```
 
-### 2.2 关键：三次 XOR 与抵消
+#### 2.2 关键：三次 XOR 与抵消
 
 客户端从原始字节到"验签 message"，对 body 共做 **3 次 XOR**（密钥都是 `sig`）：
 
@@ -108,7 +112,7 @@ body = s_xor(sig, body)            # 仅一次
 data = sig + body
 ```
 
-### 2.3 XOR（`sub_14024A190`）
+#### 2.3 XOR（`sub_14024A190`）
 
 循环密钥 XOR（密钥 = 64 字节 sig）：
 
@@ -117,7 +121,7 @@ def s_xor(key: bytes, data: bytes) -> bytes:
     return bytes(b ^ key[i % len(key)] for i, b in enumerate(data))
 ```
 
-### 2.4 gzip（`sub_140289270`）
+#### 2.4 gzip（`sub_140289270`）
 
 zlib `inflateInit2(wbits=31)` = **gzip 格式**（zlib 1.2.11，Qt 自带）。
 
@@ -129,20 +133,20 @@ def gzip_compress(data: bytes) -> bytes:
 
 ---
 
-## 3. 数字签名
+### 3. 数字签名
 
-### 3.1 算法
+#### 3.1 算法
 
 **Ed25519**（CryptoPP `ed25519Verifier` / `ed25519PublicKey`）。
 - 签名 64 字节，公钥 32 字节，私钥 32 字节。
 - license 里前 64 字节 = 签名，同时复用为 XOR 密钥。
 
-### 3.2 签名对象
+#### 3.2 签名对象
 
 签名的 message = **明文 JSON 字节**（即 `make_json` 输出的 UTF-8）。
 客户端验签 message = `gunzip(body ^ sig)`，必须等于签名时的明文 JSON。
 
-### 3.3 公钥（客户端硬编码）
+#### 3.3 公钥（客户端硬编码）
 
 客户端硬编码的官方公钥（经 AES-128-CTR 解密后）：
 
@@ -154,7 +158,7 @@ def gzip_compress(data: bytes) -> bytes:
 - 加密方式：**AES-128-CTR**（块函数 `sub_14002ECA0`，密钥扩展 `sub_14002EA60`），key/nonce 在 `sub_14024FE70` 懒解密。
 - 该公钥对应的私钥在官方手里，无法伪造签名（Ed25519 设计目的）。
 
-### 3.4 破解方式（二选一）
+#### 3.4 破解方式（二选一）
 
 **方式 A：替换公钥**
 用自己的密钥对，把硬编码公钥密文替换成自己公钥的密文（同一 AES-CTR keystream，因已知明文+密文可异或得 keystream）。
@@ -173,7 +177,7 @@ Patch：
 
 > 本项目使用方式 B，故 `main.py` 中的密钥对可为自签密钥。
 
-### 3.5 自签密钥对（main.py）
+#### 3.5 自签密钥对（main.py）
 
 ```
 PRIVATE_KEY = 951743f1381818ec1af9a32a2eafce42c6261f5089468ef863e7b903c183b3f6
@@ -182,23 +186,23 @@ PUBLIC_KEY  = 1ebf8f1197d33a99aee6c625e306739eb9bf1c2806324eb7b83a09933062aa04
 
 ---
 
-## 4. 授权信息 JSON
+### 4. 授权信息 JSON
 
-### 4.1 结构（`make_json`）
+#### 4.1 结构（`make_json`）
 
 ```json
 {
-  "nam": "用户名",
-  "eml": "邮箱",
-  "lic": "123",
-  "dev": 666,
-  "pln": "Personal",
+  "nam": "XXXX",
+  "eml": "XXXX",
+  "lic": "XXXX",
+  "dev": XXXX,
+  "pln": "XXXX",
   "dom": "XXXX",
   "api": 0,
-  "iat": "2026-06-25 12:01:01",
-  "exp": "2099-01-01 11:11:11",
-  "exx": "2099-01-01 11:11:11",
-  "ref": "2099-01-01 11:11:11",
+  "iat": "TIME",
+  "exp": "TIME",
+  "exx": "TIME",
+  "ref": "TIME",
   "hwi": {
     "machineid": "XXXX-XXXXXXXX-XXXXXXXX",
     "platform": 1,
@@ -207,13 +211,13 @@ PUBLIC_KEY  = 1ebf8f1197d33a99aee6c625e306739eb9bf1c2806324eb7b83a09933062aa04
 }
 ```
 
-### 4.2 客户端解析（`LicenseInfo::fromJson` = `sub_1402442E0`）
+#### 4.2 客户端解析（`LicenseInfo::fromJson` = `sub_1402442E0`）
 
 - 顶层键名经 `sub_14002B9B0` 等解码器从混淆常量运行时还原（语义已对齐上表）。
 - 时间字段用 `QDateTime::fromString(s, Qt::ISODateWithMs)` 解析。
 - 解析结果存入 LicenseInfo 结构体（偏移见下）。
 
-### 4.3 结构体字段偏移（Qt6，QByteArray=24 字节）
+#### 4.3 结构体字段偏移（Qt6，QByteArray=24 字节）
 
 | 字段 | JSON 键 | 结构体偏移 |
 |------|---------|------------|
@@ -234,7 +238,7 @@ PUBLIC_KEY  = 1ebf8f1197d33a99aee6c625e306739eb9bf1c2806324eb7b83a09933062aa04
 
 ---
 
-## 5. 离线校验逻辑（`validate` = `sub_140245880`）
+### 5. 离线校验逻辑（`validate` = `sub_140245880`）
 
 返回状态码，映射到提示文案（`sub_140245EA0`）。状态码：`0`=成功，`12`=无效凭证，`8`=时钟过早，`31`=已过期。
 
@@ -260,7 +264,7 @@ if (exp < now)                return 31;
 return 0;                                          // 成功
 ```
 
-### 5.1 各字段约束总结
+#### 5.1 各字段约束总结
 
 | 字段 | 约束 |
 |------|------|
@@ -275,9 +279,9 @@ return 0;                                          // 成功
 
 ---
 
-## 6. 设备码 / machineid
+### 6. 设备码 / machineid
 
-### 6.1 三种形态（核心易混点）
+#### 6.1 三种形态（核心易混点）
 
 | 形态 | 示例 | 用途 |
 |------|------|------|
@@ -287,7 +291,7 @@ return 0;                                          // 成功
 
 **结论：`make_json` 的 `hwi.machineid` 直接填比较用明文 `XXXX-XXXXXXXX-XXXXXXXX` 即可（JSON 层是明文，客户端内部自行 encode/decode）。**
 
-### 6.2 比较用明文的生成（`genId` = `sub_140288D10`）
+#### 6.2 比较用明文的生成（`genId` = `sub_140288D10`）
 
 ```
 genId(len) = blake2s('Snipaste 2', '1', MachineUniqueId)[-len:]
@@ -304,7 +308,7 @@ genId(len) = blake2s('Snipaste 2', '1', MachineUniqueId)[-len:]
 1. `HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid`
 2. `HKLM\SOFTWARE\Microsoft\SQMClient\MachineId`
 
-### 6.3 Blake2s 哈希（`sub_140288F90`）
+#### 6.3 Blake2s 哈希（`sub_140288F90`）
 
 ```python
 def x_Blake2s_128(data: bytes, r_sz: int) -> bytes:
@@ -315,7 +319,7 @@ def x_Blake2s_128(data: bytes, r_sz: int) -> bytes:
     return h.digest()[-r_sz:]             # 取右 r_sz 字节
 ```
 
-### 6.4 界面展示码的生成（`x_gen_device_id`，仅展示用）
+#### 6.4 界面展示码的生成（`x_gen_device_id`，仅展示用）
 
 ```
 01 | blake2s(MachineGuid)[-4:] | blake2s(工作组)[-4:]
@@ -325,7 +329,7 @@ def x_Blake2s_128(data: bytes, r_sz: int) -> bytes:
 ```
 本机 = `X-XXXXX-XXXXX-XXXXX-XXXXX`。
 
-### 6.5 字段 encode/decode（`sub_14026DB40` / `sub_14026DC80`）
+#### 6.5 字段 encode/decode（`sub_14026DB40` / `sub_14026DC80`）
 
 客户端内部对 machineid 字段做的对称编码（JSON 层不需要，仅供理解）：
 
@@ -343,7 +347,7 @@ decode: key = data[0]
 
 ---
 
-## 7. 工作组（dom 字段）
+### 7. 工作组（dom 字段）
 
 客户端用 **`NetWkstaGetInfo(level=100)`** 取 `wki100_langroup`（`sub_1402AC550`），**不是** WMI。
 
@@ -359,7 +363,7 @@ dom 字段填本机工作组明文 `"XXXX"` 即可（走 way1）。
 
 ---
 
-## 8. 保护机制汇总
+### 8. 保护机制汇总
 
 | 保护手段 | 实现 | 位置 | 强度 |
 |----------|------|------|------|
@@ -374,14 +378,14 @@ dom 字段填本机工作组明文 `"XXXX"` 即可（走 way1）。
 | 字段 encode | XOR+rotate 对称编码 | sub_14026DB40/DC80 | 混淆 |
 | 设备绑定 | machineid/dom 比对本机 | validate | 防跨机复用 |
 
-### 8.1 字符串/常量混淆机制
+#### 8.1 字符串/常量混淆机制
 
 关键字符串、字段名、配置常量不以明文存储，而是编码成 **trie（Huffman 式）** 结构，运行时按一个 32 位魔数逐 bit 走表解码：
 - `clz32`（`sub_14002C3C0`）定位魔数最高有效位。
 - 从 MSB 逐 bit 在 trie 表（`unk_...`，每节点 4 字节：bit/is_leaf/cur/next）中走边，到叶子得结果。
 - 表被篡改 → 走不到叶子 → 抛 `std::exception` 自毁（兼作完整性自检）。
 
-### 8.2 反调试陷阱
+#### 8.2 反调试陷阱
 
 `sub_140275930`（底层 `CheckRemoteDebuggerPresent`）被用作 XOR 的门控，逻辑反写：
 ```
@@ -392,7 +396,7 @@ dom 字段填本机工作组明文 `"XXXX"` 即可（走 way1）。
 
 ---
 
-## 9. 生成端完整流程（main.py）
+### 9. 生成端完整流程（main.py）
 
 ```
 1. dom        = get_workgroup()                    # NetWkstaGetInfo → 'XXXX'
@@ -408,32 +412,4 @@ dom 字段填本机工作组明文 `"XXXX"` 即可（走 way1）。
 10. code      = '0' + checkchar + '-' + b64
 ```
 
-客户端启用方式 B（patch 验签）后，自签密钥即可通过。
-
----
-
-## 10. 关键函数对照表
-
-| 客户端函数 | 作用 | Python 对应 |
-|-----------|------|-------------|
-| sub_14024C9C0 | setLicenseKey 入口 | simulate_client |
-| sub_140288C00 | 校验字符 | calculate_adjacent_char_diff_sum |
-| sub_140289400 | Base64 解码 | base64 |
-| sub_14024AB20 | postProcess(XOR+gzip) | s_xor + gzip |
-| sub_14024A190 | 循环 XOR | s_xor |
-| sub_140289270 | gunzip | gzip_decompress |
-| sub_14024B1D0 | 验签外壳 | Ed25519Helper.verify |
-| sub_14024B630/140250020 | Ed25519 verify | （patch 点） |
-| sub_1402442E0 | fromJson | json.loads |
-| sub_140245880 | validate 校验 | （约束见第5节） |
-| sub_140288D10 | genId 设备码 | gen_expected_machineid |
-| sub_140288F90 | blake2s 哈希 | x_Blake2s_128 |
-| sub_1402AC550 | 工作组 | get_workgroup (NetWkstaGetInfo) |
-| sub_14026DB40/DC80 | 字段 encode/decode | encode/decode_field |
-| sub_140249FA0 | 公钥解密 | （AES-CTR） |
-| sub_140275930 | 反调试 | （生成端无视） |
-| sub_14002C3C0 | clz32 | （trie 解码辅助） |
-
----
-
-*文档基于 Snipaste 客户端逆向，Qt 6.2.4 / x64。仅供安全研究与互操作性分析。*
+客户端patch 验签后，自签密钥即可通过。[/md]
