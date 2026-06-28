@@ -469,7 +469,7 @@ def activation_client_machine(name:str, device_info:str):
     dom = device_info_json['dom']
     machineid = device_info_json['machineid']
 
-    activation_code = activation_machine('ikun', dom, machineid)
+    activation_code = activation_machine(name, dom, machineid)
     print('-'*50)
     print('The activation code for the client machine is:')
     print(activation_code)
